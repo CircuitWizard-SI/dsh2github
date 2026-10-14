@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dsh2github"
-version = "0.1.0"
+version = "0.1.1"
 description = "Continue local DeepSeek Harness sessions and decide permissions through private GitHub Issues"
 readme = "README.md"
 requires-python = ">=3.11"

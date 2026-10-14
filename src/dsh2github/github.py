@@ -91,6 +91,9 @@ class GitHub:
     def edit_issue(self, number, body):
         return api(f"{self.prefix}/issues/{number}", "PATCH", {"body": body})
 
+    def issue(self, number):
+        return api(f"{self.prefix}/issues/{number}")
+
     def close(self, number):
         return api(f"{self.prefix}/issues/{number}", "PATCH", {"state": "closed"})
 

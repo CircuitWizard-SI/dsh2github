@@ -1,5 +1,7 @@
 # dsh2github
 
+当前版本：**0.1.1**。已对齐 codex2github 0.1.7 的对应功能。
+
 用 GitHub Issue 远程继续本机 **DeepSeek Harness（DSH）原会话**，并在手机上允许或拒绝具体权限请求。基于 [codex2github](https://github.com/CircuitWizard-SI/codex2github) 的使用方式重新实现 DSH 执行接口。
 
 当前版本面向 Windows 和 DSH **0.2.0-rc.2**。电脑需要在线，Harness 和监听器需要保持运行。
@@ -62,6 +64,8 @@ gh repo create YOUR_USER/dsh-tasks --private
 
 ## 权限确认
 
+项目没有任务总时长限制：运行超过 30 分钟仍继续等待 DSH 的真实完成或失败。单次连接请求的超时和下述权限确认有效期不会作为任务总时长上限。
+
 连接到 GitHub 的会话，在监听器心跳有效时将权限确认交给远端；未连接的会话仍使用原本机确认。子代理请求回到父会话的 Issue。请求必须同时匹配完整 ID、会话、Issue 和宿主实例，过期或重复冲突操作会拒绝。没有“全部允许”、永久授权或自动批准。
 
 审批最长等待 15 分钟，超时拒绝。监听器心跳中断后，等待请求会交还本机确认；新请求直接交给原本机确认。宿主重启、任务取消或插件卸载会使旧请求失效。每次回执明确区分“DSH 已确认”和“回执暂未确认”。
@@ -71,6 +75,8 @@ gh repo create YOUR_USER/dsh-tasks --private
 如果原会话采用 `never` 审批策略，DSH 会在生成权限卡之前直接拒绝相关操作。连接回执会明确提示该状态；桥接器不把它伪装成“等待远端允许”，也不会自行改成 `ask`。
 
 ## 验证与限制
+
+点击入口中的“➕ 新建会话”可创建空会话，先用 `/models`、`/model`、`/effort` 选模型与档位，再留言实际任务。新任务绑定 Session 后，原 Issue 正文会自动出现“查看完整会话记录”；任务尚在执行时也会附上链接，首次同步后可打开。已存在的新任务会自动补齐，原正文和评论会保留。多页历史通过页内上一页／下一页继续查看。
 
 查看 [验证记录](docs/VALIDATION.md)、[架构](docs/ARCHITECTURE.md)、[配置](docs/CONFIGURATION.md) 和 [安全说明](SECURITY.md)。DSH 内部接口仍在变化，本版本对模型选择使用一个经过版本检查的单会话接口；升级 DSH 后先运行 `doctor`。
 

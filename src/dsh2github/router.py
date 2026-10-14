@@ -11,6 +11,7 @@ from .host import Host, HostError
 from .github import GitHub
 from .text import redact, label, chunks
 from urllib.parse import urlencode
+from .history import NEW_CHAT, START as HISTORY_START, END as HISTORY_END, panel as history_panel, decorate
 
 BOT = "<!-- dsh2github:reply -->"
 HELP = """直接留言继续当前 DSH 会话；新建 Issue 启动新任务。
@@ -125,7 +126,11 @@ class Router:
         return self.state["hub"]
 
     def update_hub(self):
-        body = "<!-- dsh2github:hub -->\n" + HELP + "\n\n## 本机会话\n\n| 名称 | ID | 状态 |\n|---|---|---|\n"
+        new_chat = f"https://github.com/{self.settings.repo}/issues/new?" + urlencode({
+            "labels": "dsh-session", "title": "新建 DSH 会话", "body": NEW_CHAT})
+        body = ("<!-- dsh2github:hub -->\n" + HELP + f"\n\n[➕ 新建会话]({new_chat})\n\n"
+            "新建后可先用 `/models`、`/model`、`/effort` 选择，再留言实际任务。\n\n"
+            "## 本机会话\n\n| 名称 | ID | 状态 |\n|---|---|---|\n")
         for sid, row in self.records.items():
             if row.get("origin") != "subagent":
                 room = next((n for n, info in self.state["issues"].items()
@@ -155,24 +160,54 @@ class Router:
             info["session_label"] = True
             self.save()
         if info.get("initialized"):
+            # Recover origin metadata for sessions made before history panels.
+            expected = str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://github.com/{self.settings.repo}/issues/{number}"))
+            if number != self.state.get("hub") and info.get("sid") == expected:
+                if "new_task" not in info or "body_done" not in info:
+                    info.setdefault("new_task", True)
+                    info.setdefault("body_done", True)
+                    self.save()
             return info
         if number != self.state.get("hub"):
             bind = re.search(r"<!-- dsh2github:bind ([A-Za-z0-9_.:-]+) -->", issue.get("body") or "")
             if bind:
                 self.bind(number, bind[1], "bind")
+                if HISTORY_START in (issue.get("body") or "") and HISTORY_END in (issue.get("body") or ""):
+                    info.update(new_task=True, body_done=True)
             else:
                 # Persist the caller-minted session ID before contacting DSH.
                 sid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"https://github.com/{self.settings.repo}/issues/{number}"))
                 info["sid"] = sid
+                info["new_task"] = True
                 self.save()
                 self.settings.workspace.mkdir(parents=True, exist_ok=True)
                 self.host.call("create", {"sessionId": sid, "cwd": str(self.settings.workspace)})
                 body = (issue.get("body") or "").strip()
-                prompt = issue["title"] + ("\n\n" + body if body else "")
-                self.enqueue(number, prompt, 0)
+                if body != NEW_CHAT:
+                    prompt = issue["title"] + ("\n\n" + body if body else "")
+                    self.enqueue(number, prompt, 0)
+                info["body_done"] = True
         info["initialized"] = True
         self.save()
         return info
+
+    def ensure_history_link(self, issue):
+        number = issue["number"]
+        info = self.state["issues"].get(str(number), {})
+        sid = info.get("sid")
+        if not sid or not info.get("new_task") or not info.get("body_done") or number == self.state.get("hub"):
+            return False
+        block = history_panel(self.settings.repo, sid)
+        if block in (issue.get("body") or ""):
+            return False
+        # Preserve edits made after the list call. Only our marked panel changes.
+        current = self.github.issue(number)
+        body = current.get("body") or ""
+        updated = decorate(body, block)
+        if updated != body:
+            self.github.edit_issue(number, updated)
+        issue["body"] = updated
+        return updated != body
 
     def select_session(self, selector):
         matches = [sid for sid, row in self.records.items() if sid == selector or sid.startswith(selector) or row.get("title") == selector]
@@ -485,6 +520,14 @@ class Router:
                         self.reply(number, str(error), f"error {comment['id']}")
                 info["cursor"] = comment["id"]
                 self.save()
+            try:
+                self.ensure_history_link(issue)
+            except (OSError, ValueError, RuntimeError) as error:
+                # A missing history link never prevents delivery or completion.
+                self.state.setdefault("history_link_errors", {})[str(number)] = redact(str(error))[:300]
+                self.save()
+            else:
+                self.state.get("history_link_errors", {}).pop(str(number), None)
         self.host.call("heartbeat", {"sessions": self.owned_sessions()})
         for number, job in list(self.state["jobs"].items()):
             if not job.get("submitted"):

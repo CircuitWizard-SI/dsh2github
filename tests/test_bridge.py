@@ -22,7 +22,15 @@ class FakeGitHub:
             self.posts.append((number, body, marker))
         return {"id": len(self.posts)}
     def edit_issue(self, number, body):
-        pass
+        self.edits = getattr(self, "edits", []) + [(number, body)]
+        row = next((x for x in self.rows if x["number"] == number), None)
+        if row is not None:
+            row["body"] = body
+    def issue(self, number):
+        row = dict(next(x for x in self.rows if x["number"] == number))
+        if number in getattr(self, "latest_bodies", {}):
+            row["body"] = self.latest_bodies[number]
+        return row
     def close(self, number):
         self.closed.append(number)
     def label_session(self, number):
@@ -251,6 +259,95 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("1", self.router.state["jobs"])
         self.assertEqual(self.router.state["issues"]["1"]["queue"], [])
         self.assertIn("DSH 未接受", self.github.posts[-1][1])
+
+    def test_new_chat_history_link_is_available_before_task_finishes(self):
+        from dsh2github.history import history_path
+        info = self.router.state["issues"]["1"]
+        info.update(new_task=True, body_done=True)
+        self.router.state["jobs"]["1"] = {"sid": "session-a", "requestId": "active", "comment": 10, "submitted": True}
+        issue = {"number": 1, "body": "用户任务  \n", "user": {"login": "owner"}}
+        self.github.rows = [issue]
+        self.github.latest_bodies = {1: issue["body"] + "用户的最新修改"}
+        self.assertTrue(self.router.ensure_history_link(dict(issue)))
+        self.assertTrue(issue["body"].startswith("用户任务  \n用户的最新修改"))
+        self.assertIn(history_path("session-a"), issue["body"])
+        self.assertIn("首次同步", issue["body"])
+        self.assertIn("1", self.router.state["jobs"])
+        self.assertFalse(self.router.ensure_history_link(issue))
+        self.assertEqual(len(self.github.edits), 1)
+
+    def test_history_rebinding_replaces_only_managed_panel(self):
+        from dsh2github.history import START, panel
+        info = self.router.state["issues"]["1"]
+        info.update(new_task=True, body_done=True)
+        issue = {"number": 1, "body": "保留原始任务\n\n" + panel("owner/tasks", "previous")}
+        self.github.rows = [issue]
+        self.router.ensure_history_link(issue)
+        self.assertTrue(issue["body"].startswith("保留原始任务\n\n"))
+        self.assertEqual(issue["body"].count(START), 1)
+        self.assertNotIn("previous", issue["body"])
+
+    def test_history_failure_does_not_block_task_submission(self):
+        from unittest.mock import patch
+        info = self.router.state["issues"]["1"]
+        info.update(new_task=True, body_done=True)
+        self.router.enqueue(1, "继续", 10)
+        self.github.rows = [{"number": 1, "user": {"login": "owner"}, "body": "原始任务"}]
+        with patch.object(self.github, "edit_issue", side_effect=RuntimeError("temporary HTTP failure")):
+            self.router.tick()
+        self.assertTrue(self.router.state["jobs"]["1"]["submitted"])
+        self.assertIn("1", self.router.state["history_link_errors"])
+
+    def test_old_new_task_gets_origin_migrated_without_running_again(self):
+        import uuid
+        info = self.router.state["issues"]["1"]
+        info["sid"] = str(uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/owner/tasks/issues/1"))
+        issue = {"number": 1, "title": "旧任务", "body": "任务原文", "user": {"login": "owner"}}
+        self.router.ensure_issue(issue)
+        self.assertTrue(info["new_task"])
+        self.assertTrue(info["body_done"])
+        self.assertEqual(info["queue"], [])
+        self.assertFalse(any(op in {"create", "prompt"} for op, _ in self.host.calls))
+
+    def test_history_marker_restores_binding_without_replaying_task_body(self):
+        from dsh2github.history import panel
+        self.router.state["issues"].pop("1")
+        issue = {"number": 1, "title": "旧任务", "body": "已执行任务\n\n" + panel("owner/tasks", "session-a")}
+        info = self.router.ensure_issue(issue)
+        self.assertEqual(info["sid"], "session-a")
+        self.assertEqual(info["queue"], [])
+        self.assertTrue(info["body_done"])
+        self.assertFalse(any(op in {"create", "prompt"} for op, _ in self.host.calls))
+
+    def test_new_chat_entry_waits_for_task_and_allows_model_selection(self):
+        from dsh2github.history import NEW_CHAT
+        issue = {"number": 2, "title": "新建 DSH 会话", "body": NEW_CHAT, "labels": [{"name": "dsh-session"}]}
+        info = self.router.ensure_issue(issue)
+        self.assertTrue(info["sid"])
+        self.assertEqual(info["queue"], [])
+        self.router.command(2, "/model local/model-b", 12)
+        self.router.command(2, "实际任务", 13)
+        self.assertEqual(info["queue"][0]["text"], "实际任务")
+        self.assertEqual(info["queue"][0]["selection"]["model"], "model-b")
+
+    def test_task_older_than_thirty_minutes_keeps_waiting_for_real_result(self):
+        import time
+        self.router.state["jobs"]["1"] = {"sid": "session-a", "requestId": "old-task",
+            "comment": 10, "submitted": True, "started_at": time.time() - 7200}
+        self.github.rows = [{"number": 1, "body": "", "user": {"login": "owner"}}]
+        self.router.tick()
+        self.assertIn("1", self.router.state["jobs"])
+        self.assertFalse(any(op in {"prompt", "cancel", "interrupt"} for op, _ in self.host.calls))
+
+    def test_full_history_pages_have_working_next_and_previous_links(self):
+        from dsh2github.session_sync import sync
+        from dsh2github.history import history_path
+        self.host.snapshots["session-a"]["events"] = [{"type": "assistant/message", "text": "汉" * 65000}]
+        sync(self.router, refresh=False)
+        first = self.settings.runtime_dir / "repository" / history_path("session-a")
+        self.assertIn("[下一页](page-001.md)", first.read_text(encoding="utf-8"))
+        second = first.with_name("page-001.md")
+        self.assertIn("[上一页](page-000.md)", second.read_text(encoding="utf-8"))
 
     def test_result_requires_own_prompt_and_turn_end(self):
         events = [

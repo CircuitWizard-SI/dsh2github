@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from .github import api
 from .storage import write_if_changed
 from .text import label, redact, chunks
+from .history import folder_for
 
 
 def sync(router, publish=False, *, refresh=True):
@@ -23,8 +24,8 @@ def sync(router, publish=False, *, refresh=True):
     next_cache = {}
     for sid, row in router.records.items():
         # Session IDs are opaque identifiers, never usable filesystem paths.
-        folder = hashlib.sha256(sid.encode()).hexdigest()[:32]
-        key = json.dumps([row.get("updatedAt"), row.get("running"), row.get("title")], sort_keys=True)
+        folder = folder_for(sid)
+        key = json.dumps([2, row.get("updatedAt"), row.get("running"), row.get("title")], sort_keys=True)
         if cache.get(sid, {}).get("key") == key:
             pages = cache[sid]["pages"]
         else:
@@ -40,7 +41,17 @@ def sync(router, publish=False, *, refresh=True):
                     continue
                 role = "用户" if event["type"] == "user/message" else "DSH"
                 content += f"## {role}\n\n{redact(event['text'])}\n\n"
-            pages = {f"sessions/{folder}/page-{n:03}.md": part for n, part in enumerate(chunks(content, 180000))}
+            parts = list(chunks(content, 180000))
+            pages = {}
+            for n, part in enumerate(parts):
+                navigation = []
+                if n:
+                    navigation.append(f"[上一页](page-{n - 1:03}.md)")
+                navigation.append(f"第 {n + 1}/{len(parts)} 页")
+                if n + 1 < len(parts):
+                    navigation.append(f"[下一页](page-{n + 1:03}.md)")
+                nav = " · ".join(navigation)
+                pages[f"sessions/{folder}/page-{n:03}.md"] = nav + "\n\n" + part + "\n\n" + nav + "\n"
         files.update(pages)
         next_cache[sid] = {"key": key, "pages": pages}
         first = next(iter(pages))
