@@ -1,0 +1,16 @@
+config.json
+config.local*.json
+.env*
+.runtime/
+.test-runtime/
+.venv/
+workspace/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+node_modules/
+*.log
+*.lock
+*.sqlite*

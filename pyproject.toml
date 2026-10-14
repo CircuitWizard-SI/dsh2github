@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dsh2github"
+version = "0.1.0"
+description = "Continue local DeepSeek Harness sessions and decide permissions through private GitHub Issues"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "CircuitWizard-SI" }]
+dependencies = []
+
+[project.scripts]
+dsh2github = "dsh2github.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/CircuitWizard-SI/dsh2github"
+Issues = "https://github.com/CircuitWizard-SI/dsh2github/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dsh2github = ["host/*.mjs", "host/*.yml", "host/package.json"]

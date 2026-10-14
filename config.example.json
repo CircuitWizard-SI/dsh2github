@@ -1,0 +1,7 @@
+{
+  "repo": "OWNER/dsh-tasks",
+  "workspace": "workspace",
+  "runtime_dir": ".runtime",
+  "poll_seconds": 15,
+  "sync_seconds": 30
+}
