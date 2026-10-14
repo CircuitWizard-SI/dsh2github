@@ -13,8 +13,13 @@ def api(endpoint, method="GET", body=None):
     args = ["gh", "api", endpoint, "--method", method]
     if body is not None:
         args += ["--input", "-"]
-    result = subprocess.run(args, input=json.dumps(body, ensure_ascii=False) if body is not None else None,
-        capture_output=True, text=True, encoding="utf-8", timeout=45)
+    try:
+        result = subprocess.run(args, input=json.dumps(body, ensure_ascii=False) if body is not None else None,
+            capture_output=True, text=True, encoding="utf-8", timeout=20)
+    except subprocess.TimeoutExpired:
+        # The watch loop handles RuntimeError and reconciles POSTs by their
+        # fixed markers; a slow network must not terminate the listener.
+        raise RuntimeError(f"GitHub {method} timed out for {endpoint.split('?')[0]}; response unconfirmed") from None
     if result.returncode:
         raise RuntimeError(f"GitHub {method} failed for {endpoint.split('?')[0]} (exit {result.returncode})")
     return json.loads(result.stdout) if result.stdout.strip() else {}
@@ -26,8 +31,13 @@ class GitHub:
         self.prefix = "repos/" + repo
         self.owner = None
         self._session_label_ready = False
+        self._validated_at = 0
+        self._metadata = None
 
-    def validate(self):
+    def validate(self, *, fresh=False):
+        import time
+        if not fresh and self._metadata and time.monotonic() - self._validated_at < 60:
+            return self._metadata
         meta = api(self.prefix)
         profile = api("user")
         if not is_private_task_repository(meta) or meta.get("owner", {}).get("type") != "User":
@@ -35,6 +45,8 @@ class GitHub:
         if meta.get("full_name", "").casefold() != self.repo.casefold() or profile.get("login") != meta["owner"]["login"]:
             raise ValueError("Authenticate as the task repository owner")
         self.owner = profile["login"]
+        self._metadata = meta
+        self._validated_at = time.monotonic()
         return meta
 
     def pages(self, endpoint):
@@ -81,6 +93,20 @@ class GitHub:
 
     def close(self, number):
         return api(f"{self.prefix}/issues/{number}", "PATCH", {"state": "closed"})
+
+    def artifact_blob(self, name):
+        # A single tree lookup also avoids interpreting a network failure as a
+        # missing file. Cache nothing across publication attempts.
+        try:
+            reference = api(self.prefix + "/git/ref/heads/main")
+        except RuntimeError:
+            if self.validate().get("size") == 0:
+                return None
+            raise
+        tree = api(self.prefix + "/git/trees/" + reference["object"]["sha"] + "?recursive=1")
+        if tree.get("truncated"):
+            raise RuntimeError("Artifact lookup tree truncated")
+        return next((row["sha"] for row in tree["tree"] if row["path"] == name and row["type"] == "blob"), None)
 
     def publish(self, files):
         metadata = self.validate()

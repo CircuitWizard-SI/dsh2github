@@ -8,9 +8,10 @@ from .storage import write_if_changed
 from .text import label, redact, chunks
 
 
-def sync(router, publish=False):
+def sync(router, publish=False, *, refresh=True):
     router.github.validate()
-    router.refresh()
+    if refresh:
+        router.refresh()
     root = router.settings.runtime_dir / "repository"
     files = {"README.md": "# DeepSeek Harness 本机会话\n\n"}
     if router.state.get("hub"):

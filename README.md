@@ -29,16 +29,16 @@ gh auth login
 gh repo create YOUR_USER/dsh-tasks --private
 .\.venv\Scripts\python.exe -m dsh2github init --repo YOUR_USER/dsh-tasks
 .\.venv\Scripts\python.exe -m dsh2github install-host --profile desktop
-.\.venv\Scripts\python.exe -m dsh2github doctor
 .\.venv\Scripts\python.exe -m dsh2github setup
-.\.venv\Scripts\python.exe -m dsh2github watch
+.\scripts\start.ps1
+.\.venv\Scripts\python.exe -m dsh2github doctor
 ```
 
 将 `YOUR_USER` 换成自己的账号。`setup` 打印会话入口链接。打开入口 Issue，发送 `/session 会话名或ID`，连接确认后直接留言。也可以新建 Issue 写任务。
 
 `install-host` 向该 DSH profile 的补丁文件追加一个宿主插件，并先保存本机备份；不改模型路由、密钥或权限策略。Desktop 支持补丁实时加载；若 `doctor` 未检测到宿主，请在没有运行任务时重新打开 Harness。插件仅监听 `127.0.0.1`，使用随机本机令牌；令牌不上传 GitHub。支持已有 `web` profile，使用 `--profile web` 安装后启动 `dsh web`。
 
-后台启动：`scripts/start.ps1`；不会安装系统服务或开机启动项。停止桥接器：`scripts/stop.ps1`。停止监听器不会中断已被 DSH 接收的任务。
+后台启动：`scripts/start.ps1`，运行独立监督进程，在监听意外退出后重新启动；不会安装系统服务或开机启动项。脚本等待实际留言轮询成功后才显示就绪。`doctor` 的 `ok` 表示前提条件，`ready` 还要求监听进程存活、状态新鲜且最近轮询成功。停止桥接器：`scripts/stop.ps1`。停止监听器不会中断已被 DSH 接收的任务。
 
 ## 远程指令
 
@@ -68,11 +68,15 @@ gh repo create YOUR_USER/dsh-tasks --private
 
 已有权限请求发生后才连接会话，不能抢接已经由本机弹窗持有的旧请求；请在任务开始前连接会话。DSH 的自动审查、安全拒绝和沙盒继续生效，本项目只处理宿主真正发出的 `approval/request`。
 
+如果原会话采用 `never` 审批策略，DSH 会在生成权限卡之前直接拒绝相关操作。连接回执会明确提示该状态；桥接器不把它伪装成“等待远端允许”，也不会自行改成 `ask`。
+
 ## 验证与限制
 
 查看 [验证记录](docs/VALIDATION.md)、[架构](docs/ARCHITECTURE.md)、[配置](docs/CONFIGURATION.md) 和 [安全说明](SECURITY.md)。DSH 内部接口仍在变化，本版本对模型选择使用一个经过版本检查的单会话接口；升级 DSH 后先运行 `doctor`。
 
 历史仅导出可见用户和助手文本，不导出内部推理、工具输出、系统提示或认证配置。脱敏属于尽力处理。`watch --no-publish` 可关闭历史上传，任务回复和权限卡继续写入私有 Issue。
+
+历史同步在独立工作线程中进行，不能阻塞留言和权限决定。最终回复明确引用的本机图片／文档，若位于会话工作目录或配置工作目录且不超过 10 MB，会发布到私有任务仓库并替换成本机之外可访问的链接；认证配置文件和工作目录之外的文件不自动发布。
 
 ```powershell
 python -m unittest discover -s tests -v

@@ -10,6 +10,7 @@ from .storage import read_json, write_if_changed
 from .host import Host, HostError
 from .github import GitHub
 from .text import redact, label, chunks
+from urllib.parse import urlencode
 
 BOT = "<!-- dsh2github:reply -->"
 HELP = """直接留言继续当前 DSH 会话；新建 Issue 启动新任务。
@@ -72,6 +73,8 @@ class Router:
         self.records = {}
         self.catalog = None
         self.route = None
+        from .artifacts import Artifacts
+        self.artifacts = Artifacts(settings, self.github)
 
     def save(self):
         write_if_changed(self.path, json.dumps(self.state, ensure_ascii=False, indent=2) + "\n")
@@ -125,7 +128,15 @@ class Router:
         body = "<!-- dsh2github:hub -->\n" + HELP + "\n\n## 本机会话\n\n| 名称 | ID | 状态 |\n|---|---|---|\n"
         for sid, row in self.records.items():
             if row.get("origin") != "subagent":
-                body += f"| {label(row.get('title', sid))} | `{sid}` | {'执行中' if row.get('running') else '空闲'} |\n"
+                room = next((n for n, info in self.state["issues"].items()
+                    if info.get("sid") == sid and not info.get("closed") and int(n) != self.state.get("hub")), None)
+                if room:
+                    url = f"https://github.com/{self.settings.repo}/issues/{room}"
+                else:
+                    query = urlencode({"labels": "dsh-session", "title": "对话：" + row.get("title", sid)[:100],
+                        "body": f"<!-- dsh2github:bind {sid} -->\n继续本机原会话，直接在下方留言。"})
+                    url = f"https://github.com/{self.settings.repo}/issues/new?{query}"
+                body += f"| [{label(row.get('title', sid))}]({url}) | `{sid}` | {'执行中' if row.get('running') else '空闲'} |\n"
         # Keep the mobile entry within GitHub's body size cap. Full index is in README.
         parts = list(chunks(body))
         if len(parts) > 1:
@@ -178,7 +189,13 @@ class Router:
             raise ValueError("当前 Issue 有执行或等待消息，处理完后再切换会话")
         info["sid"] = self.select_session(selector)
         self.save()
-        self.reply(number, f"已连接原 DSH 会话 `{info['sid']}`。直接留言继续；权限确认可用 `/allow 请求ID` 或 `/deny 请求ID`。", key)
+        snapshot = self.host.call("session", {"sessionId": info["sid"]})
+        policy = snapshot.get("approvalPolicy", "unknown")
+        hint = ("\n\n当前会话审批策略为 never：DSH 会直接拒绝需要确认的操作，不会产生远端 Allow 卡。"
+                "请在 DSH 中将这个会话设置为需要确认的模式后，再执行相关任务。" if policy == "never" else
+                "\n\n原生权限请求会显示卡片，可用 `/allow 请求ID` 或 `/deny 请求ID`。" if policy == "ask" else
+                "\n\n仅在 DSH 实际发出权限确认请求时显示远端确认卡。")
+        self.reply(number, f"已连接原 DSH 会话 `{info['sid']}`。直接留言继续。" + hint, key)
 
     def selection(self, info):
         return self.state["models"].get(info.get("sid"))
@@ -385,6 +402,7 @@ class Router:
             if result is None:
                 continue
             text = ("✅ " if result["ok"] else "❌ ") + (result["text"] or "DSH 轮次结束，未产生可见回复。")
+            text = self.artifacts.rewrite(text, None if job.get("failed") else snapshot.get("cwd"))
             if not result["ok"]:
                 text += "\n\n轮次结束原因：`" + json.dumps(result["reason"], ensure_ascii=False) + "`"
             for page, part in enumerate(chunks(text)):

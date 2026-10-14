@@ -28,6 +28,7 @@ def main(argv=None):
     commands.add_parser("tick", help="Process one poll")
     watch = commands.add_parser("watch", help="Run the listener")
     watch.add_argument("--no-publish", action="store_true", help="Keep history local; task replies still return to Issues")
+    commands.add_parser("supervise", help="Keep this listener running without a system service")
     sync = commands.add_parser("sync", help="Export visible session histories")
     sync.add_argument("--publish", action="store_true")
     room = commands.add_parser("open", help="Create a room bound to an original DSH session")
@@ -60,6 +61,10 @@ def main(argv=None):
             from .host import install_host
             print(json.dumps(install_host(settings, args.profile), ensure_ascii=False))
             return 0
+        if args.command == "supervise":
+            from .supervisor import supervise
+            supervise(settings)
+            return 0
         from .router import Router, Heartbeat
         router = Router(settings)
         if args.command == "doctor":
@@ -74,8 +79,11 @@ def main(argv=None):
                 checks["session_local_models"] = health.get("sessionModelSelection") is True
             except RuntimeError:
                 checks["dsh_host"] = False
-            print(json.dumps({"ok": all(checks.values()), "checks": checks}, ensure_ascii=False, indent=2))
-            return 0 if all(checks.values()) else 1
+            from .runtime import listener_status
+            listener = listener_status(settings)
+            print(json.dumps({"ok": all(checks.values()), "ready": all(checks.values()) and listener["ready"],
+                "checks": checks, "listener": listener}, ensure_ascii=False, indent=2))
+            return 0 if all(checks.values()) and listener["ready"] else 1
         if args.command == "notifications":
             from .notifications import enable, disable, test_notice
             if args.update and args.action != "enable":
@@ -110,25 +118,54 @@ def main(argv=None):
                 print(json.dumps({"ok": True, "jobs": len(router.state["jobs"])}))
             elif args.command == "watch":
                 from .session_sync import sync as sync_histories
-                router.github.validate(); router.refresh()
+                from concurrent.futures import ThreadPoolExecutor
+                from types import SimpleNamespace
+                from copy import deepcopy
+                from .github import GitHub
                 heartbeat = Heartbeat(router)
                 heartbeat.start()
+                sync_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dsh-history")
+                sync_future = None
                 next_sync = 0
+                status_path = settings.runtime_dir / "watch-status.json"
+                write_if_changed(status_path, json.dumps({"ok": False, "pid": os.getpid(),
+                    "time": time.time(), "jobs": len(router.state["jobs"]), "error": "Starting listener"}))
                 try:
                     while True:
                         try:
                             router.tick()
-                            if time.monotonic() >= next_sync:
-                                result = sync_histories(router, not args.no_publish)
+                            if sync_future is not None and sync_future.done():
+                                try:
+                                    result = sync_future.result()
+                                    sync_status = {"ok": True, **result}
+                                except (OSError, ValueError, RuntimeError) as error:
+                                    from .text import redact
+                                    sync_status = {"ok": False, "error": redact(str(error))}
+                                write_if_changed(settings.runtime_dir / "sync-status.json",
+                                    json.dumps({"time": time.time(), **sync_status}, ensure_ascii=False))
+                                sync_future = None
+                            if sync_future is None and time.monotonic() >= next_sync:
+                                # A slow history upload cannot block an Allow/Deny
+                                # comment or incoming message. The worker receives
+                                # an immutable snapshot and cannot save router state.
+                                snapshot = SimpleNamespace(settings=settings, host=router.host,
+                                    github=GitHub(settings.repo), records=deepcopy(router.records),
+                                    state=deepcopy(router.state))
+                                sync_future = sync_pool.submit(sync_histories, snapshot, not args.no_publish, refresh=False)
                                 next_sync = time.monotonic() + settings.sync_seconds
-                            write_if_changed(settings.runtime_dir / "watch-status.json", json.dumps({"ok": True, "time": time.time(), "jobs": len(router.state["jobs"])}))
+                            write_if_changed(status_path, json.dumps({"ok": True, "pid": os.getpid(),
+                                "time": time.time(), "jobs": len(router.state["jobs"])}))
                         except (OSError, ValueError, RuntimeError) as error:
                             from .text import redact
-                            write_if_changed(settings.runtime_dir / "watch-status.json", json.dumps({"ok": False, "time": time.time(), "error": redact(str(error))}))
+                            write_if_changed(status_path, json.dumps({"ok": False, "pid": os.getpid(),
+                                "time": time.time(), "jobs": len(router.state["jobs"]), "error": redact(str(error))}))
                             print("dsh2github: " + redact(str(error)), file=sys.stderr, flush=True)
                         time.sleep(settings.poll_seconds)
                 finally:
                     heartbeat.close()
+                    sync_pool.shutdown(wait=False, cancel_futures=True)
+                    write_if_changed(status_path, json.dumps({"ok": False, "pid": os.getpid(),
+                        "time": time.time(), "jobs": len(router.state["jobs"]), "error": "Listener stopped"}))
         return 0
     except KeyboardInterrupt:
         return 0

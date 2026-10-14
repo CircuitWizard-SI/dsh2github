@@ -109,6 +109,8 @@ export async function apply(ctx, config = {}) {
     if (path === '/session') {
       const snapshot = await ctx.sessionQuery.readSession(body.sessionId);
       const agent = ctx.agents.get(body.sessionId);
+      const latestPolicy = [...snapshot.events].reverse().find(e => e.type === 'approval/policy');
+      const latestPreset = [...snapshot.events].reverse().find(e => e.type === 'permission/preset');
       // Only user text, assistant text, and lifecycle metadata cross this API.
       // Tools, reasoning, system prompts, credentials and raw config stay local.
       const events = snapshot.events.filter(e => ['user/message', 'assistant/message', 'turn/start', 'turn/end'].includes(e.type)
@@ -117,7 +119,10 @@ export async function apply(ctx, config = {}) {
           ...(e.type === 'user/message' ? { text: textBlocks(e.data?.content), requestId: e.data?.source?.rpcId } : {}),
           ...(e.type === 'assistant/message' ? { text: textBlocks(e.data?.message?.content) } : {}),
           ...(e.type === 'turn/end' ? { reason: e.data?.reason } : {}) }));
-      return { sessionId: body.sessionId, running: agent?.status === 'running', events,
+      return { sessionId: body.sessionId, cwd: snapshot.session?.cwd || agent?.session?.header?.cwd,
+        approvalPolicy: latestPolicy?.data?.policy || 'unknown',
+        permissionPreset: latestPreset?.data?.preset || latestPreset?.data?.id || 'unknown',
+        running: agent?.status === 'running', events,
         queue: agent ? [...agent.inbox.nextTurn, ...agent.inbox.nextStep].map(x => ({ id: x.id, text: textBlocks(x.content) })) : [] };
     }
     if (path === '/queue/remove') return controller.updateQueue({ sessionId: body.sessionId, itemId: body.itemId, action: { kind: 'remove' } });

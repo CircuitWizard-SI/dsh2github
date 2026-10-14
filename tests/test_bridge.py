@@ -152,6 +152,14 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.github.labeled, [1])
         self.assertTrue(self.router.state["issues"]["1"]["session_label"])
 
+    def test_github_timeout_is_recoverable_by_listener(self):
+        import subprocess
+        from unittest.mock import patch
+        from dsh2github.github import api
+        with patch("dsh2github.github.subprocess.run", side_effect=subprocess.TimeoutExpired(["gh", "api"], 15)):
+            with self.assertRaises(RuntimeError):
+                api("repos/owner/tasks")
+
     def test_publish_uses_real_ref_when_repo_size_is_stale(self):
         from unittest.mock import patch
         from dsh2github.github import GitHub
